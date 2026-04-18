@@ -1,7 +1,7 @@
 [build]
 builder = "NIXPACKS"
-
+buildCommand = "npm install && npx playwright install chromium --with-deps"
 [deploy]
-startCommand = "npx playwright install chromium --with-deps && node index.js"
+startCommand = "node index.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10
