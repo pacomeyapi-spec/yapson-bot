@@ -21,6 +21,7 @@ const accounts = {
     url:      process.env.MGMT_URL  || 'https://my-managment.com',
     username: process.env.MGMT_USER || '',
     password: process.env.MGMT_PASS || '',
+    cookies:  [],   /* cookies de session injectés depuis le dashboard */
   },
 };
 
@@ -144,9 +145,30 @@ async function initBrowser(){
 }
 
 async function loginMgmt(){
-  const {url,username,password}=accounts.mgmt;
-  if(!username||!password){log('⚠️ MGMT_USER ou MGMT_PASS manquant','WARN');return false;}
+  const {url}=accounts.mgmt;
   status='connecting';
+
+  /* ── Priorité 1 : utiliser les cookies injectés depuis le dashboard ── */
+  if(accounts.mgmt.cookies && accounts.mgmt.cookies.length>0){
+    log(`Injection de ${accounts.mgmt.cookies.length} cookie(s) my-managment…`);
+    try{
+      await page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});
+      await page.context().addCookies(accounts.mgmt.cookies);
+      await page.goto(`${url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
+      if(!page.url().includes('signin')){
+        log('✅ my-managment connecté via cookies','OK');
+        status='running'; return true;
+      }
+      log('⚠️ Cookies expirés — passage au login manuel','WARN');
+    }catch(e){ log('⚠️ Erreur injection cookies: '+e.message,'WARN'); }
+  }
+
+  /* ── Priorité 2 : login via formulaire ── */
+  const {username,password}=accounts.mgmt;
+  if(!username||!password){
+    log('❌ MGMT_USER ou MGMT_PASS manquant et pas de cookies — arrêt','ERROR');
+    status='waiting_cookies'; return false;
+  }
   log(`Connexion my-managment (${username})…`);
   await page.goto(`${url}/signin/`,{waitUntil:'domcontentloaded',timeout:30000});
   await page.waitForTimeout(1000);
@@ -168,10 +190,13 @@ async function loginMgmt(){
     await page.click('button[type="submit"],button.btn-primary');
     await page.waitForTimeout(3000);
   }
-  if(page.url().includes('signin')){log('❌ Connexion my-managment échouée','ERROR');status='error';return false;}
+  if(page.url().includes('signin')){log('❌ Connexion my-managment échouée (reCAPTCHA?)','ERROR');status='waiting_cookies';return false;}
   log(`✅ my-managment connecté (${username})`,'OK');
-  status='running';
-  return true;
+  /* Sauvegarder les cookies de session pour réutilisation */
+  const cookies = await page.context().cookies();
+  accounts.mgmt.cookies = cookies.filter(c=>c.domain.includes('my-managment'));
+  log(`💾 ${accounts.mgmt.cookies.length} cookie(s) de session sauvegardés`);
+  status='running'; return true;
 }
 
 async function checkSession(){
@@ -384,8 +409,8 @@ async function startBot(){
 /* ═══════════════════════════════════════════
    DASHBOARD — HTML
 ═══════════════════════════════════════════ */
-const SL={stopped:'⏹ Arrêté',connecting:'🔄 Connexion…',waiting_2fa:'📱 Code 2FA requis',running:'🟢 Actif',error:'❌ Erreur'};
-const SC={stopped:'#475569',connecting:'#38bdf8',waiting_2fa:'#f9e2af',running:'#4ade80',error:'#f38ba8'};
+const SL={stopped:'⏹ Arrêté',connecting:'🔄 Connexion…',waiting_2fa:'📱 Code 2FA requis',waiting_cookies:'🍪 Cookies requis',running:'🟢 Actif',error:'❌ Erreur'};
+const SC={stopped:'#475569',connecting:'#38bdf8',waiting_2fa:'#f9e2af',waiting_cookies:'#a78bfa',running:'#4ade80',error:'#f38ba8'};
 
 function dashboardHTML(){
   const needs2fa=(status==='waiting_2fa');
@@ -436,6 +461,28 @@ section h2{font-size:.7rem;color:#cba6f7;text-transform:uppercase;letter-spacing
   <span class="badge" style="color:${SC[status]||'#e2e8f0'}">${SL[status]||status}</span>
 </h1>
 
+${status==='waiting_cookies'?`
+<div class="box2fa" style="border-color:#a78bfa;background:#110a1c;">
+  <h3 style="color:#a78bfa;">🍪 Cookies my-managment requis</h3>
+  <p style="font-size:.75rem;color:#94a3b8;margin-bottom:12px;line-height:1.6">
+    my-managment utilise un reCAPTCHA qui bloque le login automatique.<br>
+    <b style="color:#cba6f7;">Comment obtenir tes cookies :</b><br>
+    1. Connecte-toi sur <b>my-managment.com</b> dans ton navigateur<br>
+    2. Appuie sur <b>F12</b> → onglet <b>Application</b> → <b>Cookies</b> → <b>my-managment.com</b><br>
+    3. Clique droit sur les cookies → <b>Copy all as JSON</b><br>
+    &nbsp;&nbsp;&nbsp;<i>ou utilise l'extension "EditThisCookie" → Exporter</i><br>
+    4. Colle le JSON ci-dessous et clique <b>Injecter</b>
+  </p>
+  <form action="/set-cookies" method="POST">
+    <textarea name="cookies_json" placeholder='[{"name":"session","value":"...","domain":".my-managment.com",...}]'
+      style="width:100%;background:#0a0e18;border:2px solid #a78bfa;border-radius:6px;color:#cba6f7;
+      padding:10px;font-family:monospace;font-size:.7rem;height:120px;resize:vertical;outline:none;
+      box-sizing:border-box;margin-bottom:8px;"></textarea>
+    <button type="submit" class="btn" style="background:#a78bfa;color:#0f1117;font-weight:700;padding:9px 20px;border-radius:6px;border:none;cursor:pointer;font-family:monospace;">
+      🍪 Injecter les cookies
+    </button>
+  </form>
+</div>`:''}
 ${needs2fa?`
 <div class="box2fa">
   <h3>📱 Code 2FA requis</h3>
