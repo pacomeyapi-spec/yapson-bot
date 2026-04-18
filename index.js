@@ -391,7 +391,11 @@ async function startBot(){
   /* 2. Init navigateur + login my-managment */
   await initBrowser();
   const mgmtOk=await loginMgmt();
-  if(!mgmtOk){log('❌ Impossible de se connecter à my-managment','ERROR');status='error';return;}
+  if(!mgmtOk){
+    log('⚠️ Connexion my-managment échouée — injecte tes cookies depuis le dashboard','WARN');
+    status='waiting_cookies';
+    return; /* Le serveur HTTP reste actif pour recevoir les cookies */
+  }
   running=true;
   async function loop(){
     if(!running)return;
