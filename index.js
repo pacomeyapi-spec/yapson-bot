@@ -646,6 +646,33 @@ app.post('/reset', (req,res) => {
   res.redirect('/');
 });
 
+/* Injecter les cookies my-managment */
+app.post('/set-cookies', async (req,res) => {
+  const raw = (req.body.cookies_json||'').trim();
+  if(!raw){ res.redirect('/'); return; }
+  try{
+    const cookies = JSON.parse(raw);
+    if(!Array.isArray(cookies)||cookies.length===0) throw new Error('Format invalide');
+    accounts.mgmt.cookies = cookies.map(c=>({
+      name:    c.name,
+      value:   c.value,
+      domain:  c.domain || '.my-managment.com',
+      path:    c.path   || '/',
+      secure:  c.secure  || false,
+      httpOnly:c.httpOnly|| false,
+      sameSite:c.sameSite|| 'Lax',
+    }));
+    log(`🍪 ${accounts.mgmt.cookies.length} cookie(s) injectés`,'OK');
+    status='stopped';
+    if(running){ running=false; if(loopTimer){clearTimeout(loopTimer);loopTimer=null;} }
+    startBot().catch(e=>{ log('Erreur redémarrage: '+e.message,'ERROR'); status='waiting_cookies'; });
+    res.redirect('/');
+  }catch(e){
+    log('❌ Cookies invalides: '+e.message,'ERROR');
+    res.redirect('/');
+  }
+});
+
 /* API JSON */
 app.get('/api/status', (req,res) => res.json({status,ST,accounts:{yapson:{url:accounts.yapson.url,username:accounts.yapson.username},mgmt:{url:accounts.mgmt.url,username:accounts.mgmt.username}},CFG}));
 app.get('/api/logs',   (req,res) => res.json(logs.slice(0,100)));
@@ -653,6 +680,16 @@ app.get('/api/logs',   (req,res) => res.json(logs.slice(0,100)));
 /* ═══════════════════════════════════════════
    DÉMARRAGE
 ═══════════════════════════════════════════ */
+/* ═══ Prévenir les crashes sur erreurs non catchées ═══ */
+process.on('uncaughtException', e => {
+  log('⚠️ Erreur non catchée: '+e.message, 'ERROR');
+  if(status==='running') status='waiting_cookies';
+});
+process.on('unhandledRejection', e => {
+  log('⚠️ Promise rejetée: '+(e&&e.message||e), 'ERROR');
+  if(status==='running') status='waiting_cookies';
+});
+
 app.listen(CFG.PORT, () => {
   log(`Dashboard port ${CFG.PORT}`);
   if(!accounts.yapson.username||!accounts.mgmt.username){
