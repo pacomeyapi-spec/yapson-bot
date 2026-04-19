@@ -148,63 +148,83 @@ async function loginMgmt(){
   const {url}=accounts.mgmt;
   status='connecting';
 
-  /* ── Priorité 1 : utiliser les cookies injectés depuis le dashboard ── */
+  /* ── Si des cookies sont disponibles, les utiliser directement ── */
   if(accounts.mgmt.cookies && accounts.mgmt.cookies.length>0){
     log(`Injection de ${accounts.mgmt.cookies.length} cookie(s) my-managment…`);
     try{
+      /* Aller sur le domaine pour pouvoir injecter les cookies */
       await page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});
       await page.context().addCookies(accounts.mgmt.cookies);
+      /* Naviguer directement vers la page admin */
       await page.goto(`${url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
       if(!page.url().includes('signin')){
         log('✅ my-managment connecté via cookies','OK');
         status='running'; return true;
       }
-      log('⚠️ Cookies expirés — passage au login manuel','WARN');
-    }catch(e){ log('⚠️ Erreur injection cookies: '+e.message,'WARN'); }
-  }
-
-  /* ── Priorité 2 : login via formulaire ── */
-  const {username,password}=accounts.mgmt;
-  if(!username||!password){
-    log('❌ MGMT_USER ou MGMT_PASS manquant et pas de cookies — arrêt','ERROR');
+      /* Cookies expirés → demander de nouveaux cookies */
+      log('⚠️ Cookies expirés — nouveaux cookies requis','WARN');
+      accounts.mgmt.cookies = []; /* Vider les anciens cookies */
+    }catch(e){ log('⚠️ Erreur cookies: '+e.message,'WARN'); }
     status='waiting_cookies'; return false;
   }
-  log(`Connexion my-managment (${username})…`);
-  await page.goto(`${url}/signin/`,{waitUntil:'domcontentloaded',timeout:30000});
-  await page.waitForTimeout(1000);
-  await page.fill('input[placeholder*="utilisateur"],input[type="text"]:not([placeholder*="iltr"])',username);
-  await page.fill('input[type="password"]',password);
-  await page.click('button[type="submit"]');
-  await page.waitForTimeout(3000);
-  /* 2FA requis ? */
-  const codeInput=await page.$('input[placeholder*="confirmation"],input[placeholder*="code"],input[placeholder*="Code"]');
-  if(codeInput){
-    log('Code 2FA requis — en attente depuis le dashboard…','WARN');
-    status='waiting_2fa';
-    const code=await new Promise(resolve=>{
-      resolve2FA=resolve;
-      setTimeout(()=>{if(resolve2FA){resolve2FA(null);resolve2FA=null;}},300000);
-    });
-    if(!code){log('2FA timeout','ERROR');status='error';return false;}
-    await page.fill('input[placeholder*="confirmation"],input[placeholder*="code"],input[placeholder*="Code"]',code);
-    await page.click('button[type="submit"],button.btn-primary');
-    await page.waitForTimeout(3000);
+
+  /* ── Pas de cookies → essayer le login formulaire ── */
+  const {username,password}=accounts.mgmt;
+  if(!username||!password){
+    log('❌ Pas de cookies ni identifiants — injecte tes cookies depuis le dashboard','WARN');
+    status='waiting_cookies'; return false;
   }
-  if(page.url().includes('signin')){log('❌ Connexion my-managment échouée (reCAPTCHA?)','ERROR');status='waiting_cookies';return false;}
-  log(`✅ my-managment connecté (${username})`,'OK');
-  /* Sauvegarder les cookies de session pour réutilisation */
-  const cookies = await page.context().cookies();
-  accounts.mgmt.cookies = cookies.filter(c=>c.domain.includes('my-managment'));
-  log(`💾 ${accounts.mgmt.cookies.length} cookie(s) de session sauvegardés`);
-  status='running'; return true;
+  log(`Connexion my-managment formulaire (${username})…`);
+  try{
+    await page.goto(`${url}/signin/`,{waitUntil:'domcontentloaded',timeout:30000});
+    await page.waitForTimeout(1000);
+    await page.fill('input[placeholder*="utilisateur"],input[type="text"]:not([placeholder*="iltr"])',username);
+    await page.fill('input[type="password"]',password);
+    await page.click('button[type="submit"]');
+    await page.waitForTimeout(3000);
+    /* 2FA requis ? */
+    const codeInput=await page.$('input[placeholder*="confirmation"],input[placeholder*="code"],input[placeholder*="Code"]');
+    if(codeInput){
+      log('Code 2FA requis — en attente…','WARN');
+      status='waiting_2fa';
+      const code=await new Promise(resolve=>{
+        resolve2FA=resolve;
+        setTimeout(()=>{if(resolve2FA){resolve2FA(null);resolve2FA=null;}},300000);
+      });
+      if(!code){log('2FA timeout','ERROR');status='waiting_cookies';return false;}
+      await page.fill('input[placeholder*="confirmation"],input[placeholder*="code"],input[placeholder*="Code"]',code);
+      await page.click('button[type="submit"],button.btn-primary');
+      await page.waitForTimeout(3000);
+    }
+    if(page.url().includes('signin')){
+      log('❌ Login formulaire échoué (reCAPTCHA) — injecte tes cookies','WARN');
+      status='waiting_cookies'; return false;
+    }
+    /* Succès login formulaire → sauvegarder les cookies */
+    const saved = await page.context().cookies();
+    accounts.mgmt.cookies = saved.filter(c=>c.domain.includes('my-managment'));
+    log(`✅ my-managment connecté, ${accounts.mgmt.cookies.length} cookie(s) sauvegardés`,'OK');
+    status='running'; return true;
+  }catch(e){
+    log('❌ Erreur login: '+e.message,'ERROR');
+    status='waiting_cookies'; return false;
+  }
 }
 
 async function checkSession(){
   try{
     await page.goto(`${accounts.mgmt.url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
-    if(page.url().includes('signin')){log('Session expirée — reconnexion…','WARN');return await loginMgmt();}
+    if(page.url().includes('signin')){
+      log('Session expirée — cookies requis','WARN');
+      accounts.mgmt.cookies=[]; /* Vider les cookies expirés */
+      status='waiting_cookies';
+      return false;
+    }
     return true;
-  }catch(e){log('Erreur navigation: '+e.message,'ERROR');try{return await loginMgmt();}catch(_){return false;}}
+  }catch(e){
+    log('Erreur navigation: '+e.message,'ERROR');
+    return false;
+  }
 }
 
 /* ═══════════════════════════════════════════
