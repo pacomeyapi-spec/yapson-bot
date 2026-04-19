@@ -376,11 +376,33 @@ async function pollF2(){
   const wasOn=await setupTable();
   const rows=await page.$$('table tbody tr');
   let nbConf=0,nbRej=0;
+  /* Debug : logger les premières lignes pour vérifier la structure */
+  if(rows.length>0&&ST.polls<=5){
+    log(`F2 debug: ${rows.length} ligne(s) trouvée(s) dans le tableau`);
+    for(let i=0;i<Math.min(3,rows.length);i++){
+      const cells=await rows[i].$$('td');
+      const cellTexts=[];
+      for(const c of cells) cellTexts.push((await c.textContent()).trim().substring(0,30));
+      log(`F2 ligne[${i}] (${cells.length} cols): ${cellTexts.join(' | ')}`);
+    }
+  } else if(rows.length===0&&ST.polls<=5){
+    /* Pas de tbody tr — essayer d'autres sélecteurs */
+    const allRows=await page.$$('tr');
+    log(`F2 debug: 0 tbody tr, ${allRows.length} tr total`);
+    const html=(await page.content()).substring(0,500);
+    log('F2 page snippet: '+html.replace(/\s+/g,' '));
+  }
   for(const row of rows){
-    const cells=await row.$$('td');if(cells.length<5)continue;
+    const cells=await row.$$('td');if(cells.length<3)continue;
     const date=(await cells[0].textContent()).trim();
     const info=(await cells[1].textContent()).trim();
-    const time=parseProcTime((await cells[4].textContent()).trim());
+    /* Le temps peut être dans différentes colonnes selon le tableau */
+    let time=0;
+    for(let ci=cells.length-1;ci>=2;ci--){
+      const t=(await cells[ci].textContent()).trim();
+      const parsed=parseProcTime(t);
+      if(parsed>0){time=parsed;break;}
+    }
     if(!date||confirmedPhones.has(date)||rejectedDates.has(date))continue;
     const phoneMatch=info.match(/0[0-9]{9}/);if(!phoneMatch)continue;
     const phone=phoneMatch[0];
