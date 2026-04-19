@@ -155,8 +155,8 @@ async function loginMgmt(){
       /* Aller sur le domaine pour pouvoir injecter les cookies */
       await page.goto(url,{waitUntil:'domcontentloaded',timeout:20000});
       await page.context().addCookies(accounts.mgmt.cookies);
-      /* Naviguer directement vers la page admin */
-      await page.goto(`${url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
+      /* Naviguer vers la page principale pour vérifier la session */
+      await page.goto(`${url}/fr/admin/`,{waitUntil:'domcontentloaded',timeout:20000});
       if(!page.url().includes('signin')){
         log('✅ my-managment connecté via cookies','OK');
         status='running'; return true;
@@ -213,10 +213,28 @@ async function loginMgmt(){
 
 async function checkSession(){
   try{
-    await page.goto(`${accounts.mgmt.url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
+    /* Naviguer vers la page principale d'abord */
+    await page.goto(`${accounts.mgmt.url}/fr/admin/`,{waitUntil:'domcontentloaded',timeout:20000});
     if(page.url().includes('signin')){
       log('Session expirée — cookies requis','WARN');
-      accounts.mgmt.cookies=[]; /* Vider les cookies expirés */
+      accounts.mgmt.cookies=[];
+      status='waiting_cookies';
+      return false;
+    }
+    /* Cliquer sur la tuile Pending deposit requests */
+    await page.waitForTimeout(1000);
+    const tile = await page.$('text=PENDING DEPOSIT REQUESTS, text=Pending deposit requests, text=Demandes de dépôt');
+    if(tile){
+      await tile.click();
+      await page.waitForTimeout(2000);
+    } else {
+      /* Naviguer directement si la tuile n'est pas trouvée */
+      await page.goto(`${accounts.mgmt.url}/fr/admin/report/pendingrequestrefill`,{waitUntil:'domcontentloaded',timeout:20000});
+      await page.waitForTimeout(2000);
+    }
+    if(page.url().includes('signin')){
+      log('Session expirée — cookies requis','WARN');
+      accounts.mgmt.cookies=[];
       status='waiting_cookies';
       return false;
     }
