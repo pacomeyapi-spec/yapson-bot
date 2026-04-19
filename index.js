@@ -373,6 +373,265 @@ async function findPhone(phone){
 
 async function pollF2(){
   const ok=await checkSession();if(!ok)return;
+  /* Appeler l'API JSON pour récupérer les demandes en attente */
+  let items=[];
+  try{
+    const data = await page.evaluate(async () => {
+      const r = await fetch('/admin/report/pendingrequestrefill',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+        credentials:'include'
+      });
+      return r.json();
+    });
+    items = data.data || [];
+  }catch(e){ log('Erreur API F2: '+e.message,'ERROR'); return; }
+
+  log(`F2: ${items.length} demande(s) en attente`);
+  let nbConf=0, nbRej=0;
+
+  for(const item of items){
+    const id          = String(item.id);
+    const summa       = parseInt(String(item.Summa||'0').replace(/[^0-9]/g,'')) || 0;
+    const phone       = (item.dopparam||[]).find(d=>d.description&&/0[0-9]{9}/.test(d.description))?.description||'';
+    const time        = parseProcTime(item.reviewTime||'');
+    const confirmData = (item.confirm||[])[0]?.data || {};
+    const rejectData  = (item.reject||[])[0]?.data  || {};
+
+    if(!phone){ log(`F2 skip ${id}: pas de numéro`); continue; }
+    if(confirmedPhones.has(id)||rejectedDates.has(id)) continue;
+    if(time < CFG.F2_CONF_MIN){ continue; }
+
+    log(`🔍 F2 ${phone} — ${summa}F — ${time}min`);
+
+    /* Chercher dans YapsonPress */
+    const found = await findPhone(phone);
+    if(found){
+      await apiApprove(found.id);
+      log(`Approuvé YapsonPress: ${phone} — ${found.amount}F`,'OK'); ST.sms++;
+
+      /* Confirmer sur my-managment via FormData */
+      try{
+        const confirmed = await page.evaluate(async (cdata, reportId) => {
+          const fd = new FormData();
+          fd.append('id',          String(cdata.id||''));
+          fd.append('summa',       String(cdata.summa||''));
+          fd.append('summa_user',  String(cdata.summa||''));
+          fd.append('comment',     '');
+          fd.append('is_out',      'false');
+          fd.append('report_id',   reportId);
+          fd.append('subagent_id', String(cdata.subagent_id||''));
+          fd.append('currency',    String(cdata.currency||''));
+          const r = await fetch('/admin/banktransfer/approvemoney',{
+            method:'POST', credentials:'include', body:fd
+          });
+          const d = await r.json().catch(()=>({}));
+          return r.ok && (d.success!==false);
+        }, confirmData, confirmData.report_id || Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b=>b.toString(16).padStart(2,'0')).join(''));
+
+        if(confirmed){
+          confirmedPhones.add(id); nbConf++; ST.ok++;
+          log(`✅ Confirmé: ${phone} — ${summa}F`,'OK');
+        } else {
+          log(`⚠️ Confirmation échouée: ${phone}`,'WARN');
+        }
+      }catch(e){ log('Erreur confirmation: '+e.message,'ERROR'); }
+
+    } else if(CFG.F2_REJ_ON && time>=CFG.F2_REJ_MIN && rejectData.id){
+      log(`${phone} absent (${time}min) → rejet`);
+      try{
+        const rejected = await page.evaluate(async (rdata) => {
+          const fd = new FormData();
+          fd.append('id',     String(rdata.id||''));
+          fd.append('status', '2');
+          const r = await fetch('/admin/banktransfer/rejectmoney',{
+            method:'POST', credentials:'include', body:fd
+          });
+          return r.ok;
+        }, rejectData);
+        if(rejected){ rejectedDates.add(id); nbRej++; ST.rej++;
+          log(`❌ Rejeté: ${phone}`,'WARN');
+        }
+      }catch(e){ log('Erreur rejet: '+e.message,'ERROR'); }
+    }
+  }
+  log(`Poll F2: ${nbConf} confirmé(s), ${nbRej} rejeté(s)`);
+}
+
+async function pollF1(){
+  const senders=CFG.SENDERS.split(',').map(s=>s.trim());
+  const fresh=[];
+  for(const s of senders){
+    try{
+      const msgs=await apiFetch(s);
+      for(const msg of msgs){
+        if(msg.timestamp<lastTs||seen.has(msg.id)||msg.status==='pas_de_commande'||msg.status==='approuve')continue;
+        const p=parseSMS(s,msg.content);
+        if(p&&p.amount>0)fresh.push({id:msg.id,phone:p.phone,amount:p.amount,ts:msg.timestamp});
+      }
+    }catch(e){log(`⚠️ ${s}: ${e.message}`,'WARN');}
+  }
+  if(!fresh.length){log('RAS');return;}
+  log(`🆕 ${fresh.length} nouveau(x) SMS`);
+  ST.sms+=fresh.length;
+  for(const p of fresh){await apiApprove(p.id);seen.add(p.id);log(`Approuvé YapsonPress: ${p.phone} — ${p.amount}F`);}
+  const mx=Math.max(...fresh.map(p=>p.ts||0));
+  if(mx>=lastTs)lastTs=mx+1;
+  const ok=await checkSession();if(!ok)return;
+  const wasOn=await setupTable();
+  for(const p of fresh)await confirmDeposit(p.phone,p.amount);
+  await restoreTable(wasOn);
+}
+
+/* ═══════════════════════════════════════════
+   F2
+═══════════════════════════════════════════ */
+async function findPhone(phone){
+  const senders=CFG.SENDERS.split(',').map(s=>s.trim());
+  const suffix=phone.replace(/[^0-9]/g,'').slice(-9);
+  for(const s of senders){
+    try{
+      const msgs=await apiFetch(s);
+      for(const msg of msgs){
+        if(msg.status==='approuve'||msg.status==='pas_de_commande')continue;
+        const p=parseSMS(s,msg.content);
+        if(!p)continue;
+        if(p.phone.replace(/[^0-9]/g,'').slice(-9)===suffix)return{id:msg.id,phone:p.phone,amount:p.amount};
+      }
+    }catch(e){}
+  }
+  return null;
+}
+
+async function pollF2(){
+  const ok=await checkSession();if(!ok)return;
+  /* Appeler l'API JSON directement */
+  let items=[];
+  try{
+    const data = await page.evaluate(async () => {
+      const r = await fetch('/admin/report/pendingrequestrefill',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+        credentials:'include'
+      });
+      return r.json();
+    });
+    items = data.data || [];
+  }catch(e){ log('Erreur API F2: '+e.message,'ERROR'); return; }
+
+  let nbConf=0,nbRej=0;
+  log(`F2: ${items.length} demande(s) en attente`);
+
+  for(const item of items){
+    const id     = String(item.id);
+    const dt     = item.dt || '';
+    const summa  = parseInt(String(item.Summa||'0').replace(/[^0-9]/g,'')) || 0;
+    const phone  = (item.dopparam||[]).find(d=>d.description&&/0[0-9]{9}/.test(d.description))?.description||'';
+    const time   = parseProcTime(item.reviewTime||'');
+    const confirmData = (item.confirm||[])[0]?.data;
+    const rejectData  = (item.reject||[])[0]?.data;
+
+    if(!phone){ log(`F2 skip ${id}: pas de numéro`); continue; }
+    if(confirmedPhones.has(id)||rejectedDates.has(id)) continue;
+    if(time < CFG.F2_CONF_MIN){ log(`F2 skip ${phone}: ${time}min < seuil ${CFG.F2_CONF_MIN}min`); continue; }
+
+    log(`🔍 F2 ${phone} — ${summa}F — ${time}min`);
+
+    /* Chercher dans YapsonPress */
+    const found = await findPhone(phone);
+    if(found){
+      await apiApprove(found.id);
+      log(`✅ Approuvé YapsonPress: ${phone} — ${found.amount}F`,'OK'); ST.sms++;
+      /* Confirmer sur my-managment via API */
+      if(confirmData){
+        try{
+          const ok2 = await page.evaluate(async (cdata) => {
+            const r = await fetch('/admin/report/confirmpayment',{
+              method:'POST',
+              headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+              credentials:'include',
+              body: JSON.stringify(cdata)
+            });
+            const d = await r.json();
+            return d.success || d.status === 'ok' || r.ok;
+          }, confirmData);
+          if(ok2){ confirmedPhones.add(id); nbConf++; ST.ok++;
+            log(`✅ Confirmé my-managment: ${phone} — ${summa}F`,'OK');
+          } else {
+            log(`⚠️ Confirmation API échouée pour ${phone} — tentative DOM`,'WARN');
+            const confirmed = await confirmDeposit(phone, found.amount);
+            if(confirmed){ confirmedPhones.add(id); nbConf++; }
+          }
+        }catch(e){ log('Erreur confirmation: '+e.message,'ERROR'); }
+      }
+    } else if(CFG.F2_REJ_ON && time>=CFG.F2_REJ_MIN && rejectData){
+      log(`${phone} absent (${time}min) → rejet`);
+      try{
+        const ok3 = await page.evaluate(async (rdata) => {
+          const r = await fetch('/admin/report/rejectpayment',{
+            method:'POST',
+            headers:{'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'},
+            credentials:'include',
+            body: JSON.stringify(rdata)
+          });
+          return r.ok;
+        }, rejectData);
+        if(ok3){ rejectedDates.add(id); nbRej++; ST.rej++;
+          log(`❌ Rejeté: ${phone}`,'WARN');
+        }
+      }catch(e){ log('Erreur rejet: '+e.message,'ERROR'); }
+    }
+  }
+  log(`Poll F2: ${nbConf} confirmé(s), ${nbRej} rejeté(s)`);
+}
+
+async function pollF1(){
+  const senders=CFG.SENDERS.split(',').map(s=>s.trim());
+  const fresh=[];
+  for(const s of senders){
+    try{
+      const msgs=await apiFetch(s);
+      for(const msg of msgs){
+        if(msg.timestamp<lastTs||seen.has(msg.id)||msg.status==='pas_de_commande'||msg.status==='approuve')continue;
+        const p=parseSMS(s,msg.content);
+        if(p&&p.amount>0)fresh.push({id:msg.id,phone:p.phone,amount:p.amount,ts:msg.timestamp});
+      }
+    }catch(e){log(`⚠️ ${s}: ${e.message}`,'WARN');}
+  }
+  if(!fresh.length){log('RAS');return;}
+  log(`🆕 ${fresh.length} nouveau(x) SMS`);
+  ST.sms+=fresh.length;
+  for(const p of fresh){await apiApprove(p.id);seen.add(p.id);log(`Approuvé YapsonPress: ${p.phone} — ${p.amount}F`);}
+  const mx=Math.max(...fresh.map(p=>p.ts||0));
+  if(mx>=lastTs)lastTs=mx+1;
+  const ok=await checkSession();if(!ok)return;
+  const wasOn=await setupTable();
+  for(const p of fresh)await confirmDeposit(p.phone,p.amount);
+  await restoreTable(wasOn);
+}
+
+/* ═══════════════════════════════════════════
+   F2
+═══════════════════════════════════════════ */
+async function findPhone(phone){
+  const senders=CFG.SENDERS.split(',').map(s=>s.trim());
+  const suffix=phone.replace(/[^0-9]/g,'').slice(-9);
+  for(const s of senders){
+    try{
+      const msgs=await apiFetch(s);
+      for(const msg of msgs){
+        if(msg.status==='approuve'||msg.status==='pas_de_commande')continue;
+        const p=parseSMS(s,msg.content);
+        if(!p)continue;
+        if(p.phone.replace(/[^0-9]/g,'').slice(-9)===suffix)return{id:msg.id,phone:p.phone,amount:p.amount};
+      }
+    }catch(e){}
+  }
+  return null;
+}
+
+async function pollF2(){
+  const ok=await checkSession();if(!ok)return;
   const wasOn=await setupTable();
   const rows=await page.$$('table tbody tr');
   let nbConf=0,nbRej=0;
