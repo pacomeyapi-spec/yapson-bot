@@ -673,14 +673,22 @@ app.post('/set-cookies', async (req,res) => {
   try{
     const cookies = JSON.parse(raw);
     if(!Array.isArray(cookies)||cookies.length===0) throw new Error('Format invalide');
+    /* Normaliser sameSite pour Playwright (Strict|Lax|None uniquement) */
+    const normSameSite = v => {
+      if(!v) return 'Lax';
+      const s = String(v).toLowerCase();
+      if(s==='strict') return 'Strict';
+      if(s==='none' || s==='no_restriction') return 'None';
+      return 'Lax'; /* défaut pour lax, unspecified, etc. */
+    };
     accounts.mgmt.cookies = cookies.map(c=>({
       name:    c.name,
       value:   c.value,
-      domain:  c.domain || '.my-managment.com',
+      domain:  c.domain || 'my-managment.com',
       path:    c.path   || '/',
       secure:  c.secure  || false,
       httpOnly:c.httpOnly|| false,
-      sameSite:c.sameSite|| 'Lax',
+      sameSite:normSameSite(c.sameSite),
     }));
     log(`🍪 ${accounts.mgmt.cookies.length} cookie(s) injectés`,'OK');
     status='stopped';
